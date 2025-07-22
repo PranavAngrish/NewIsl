@@ -120,9 +120,9 @@ class InferenceEngine:
         return landmarks_norm
 
     def predict(self):
-        """Performs a prediction if the buffer is full."""
+        """Performs a prediction and returns the top 5 results if the buffer is full."""
         if len(self.frame_buffer) < self.config.SEQUENCE_LENGTH:
-            return None, None
+            return None
 
         # Prepare data from buffers
         frames = np.array(self.frame_buffer)
@@ -142,11 +142,19 @@ class InferenceEngine:
         with torch.no_grad():
             logits = self.model(frames_tensor, landmarks_tensor)
             probabilities = torch.nn.functional.softmax(logits, dim=1)
-            confidence, pred_idx = torch.max(probabilities, 1)
-
-        pred_label = self.label_encoder.inverse_transform([pred_idx.item()])[0]
+            
+            # ⭐ Get top 5 predictions using torch.topk
+            top5_conf, top5_idx = torch.topk(probabilities, 5, dim=1)
         
-        return pred_label, confidence.item()
+        # Decode the top 5 indices to labels
+        indices = top5_idx.cpu().numpy().flatten()
+        confidences = top5_conf.cpu().numpy().flatten()
+        labels = self.label_encoder.inverse_transform(indices)
+
+        # Combine into a list of (label, confidence) tuples
+        top_predictions = list(zip(labels, confidences))
+        
+        return top_predictions
 
     def process_and_predict(self, frame):
         """High-level method to process a frame, update buffers, and get a prediction."""
@@ -185,8 +193,8 @@ def main(args):
         print(f"❌ Error: Could not open video source '{video_source}'.")
         return
 
-    current_prediction = "Initializing..."
-    confidence = 0.0
+    # Initialize a placeholder for the top predictions
+    top_predictions = [("Initializing...", 0.0)] * 5
 
     while True:
         ret, frame = cap.read()
@@ -194,20 +202,23 @@ def main(args):
             print("⏹️  End of video or camera feed.")
             break
 
-        # Make a copy for display to avoid drawing on the frame used for processing
         display_frame = frame.copy()
         
-        # Process the frame and get a prediction
-        pred_label, conf = engine.process_and_predict(display_frame)
+        # Process the frame and get predictions
+        predictions = engine.process_and_predict(display_frame)
         
-        if pred_label is not None:
-            current_prediction = pred_label
-            confidence = conf
+        # Update the list of predictions if the model returns a new set
+        if predictions is not None:
+            top_predictions = predictions
 
-        # Display the prediction on the frame
-        text = f"Prediction: {current_prediction} ({confidence:.2f})"
-        cv2.rectangle(display_frame, (0, 0), (700, 40), (0, 0, 0), -1)
-        cv2.putText(display_frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        # ⭐ Display the top 5 predictions on the frame
+        # Make the background rectangle larger to fit 5 lines
+        cv2.rectangle(display_frame, (0, 0), (700, 170), (0, 0, 0), -1) 
+        
+        for i, (label, conf) in enumerate(top_predictions):
+            text = f"{i+1}. {label} ({conf:.2f})"
+            y_pos = 30 + i * 30 # Calculate y position for each line
+            cv2.putText(display_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
         
         cv2.imshow('Indian Sign Language Inference', display_frame)
 
