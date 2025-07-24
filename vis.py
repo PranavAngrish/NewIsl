@@ -1,37 +1,32 @@
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
 import os
+import json
+import pickle
+from tqdm import tqdm
 from scipy.ndimage import gaussian_filter1d
-import sys
-sys.path.append("/Users/I528933/Desktop/NewIsl-main")
 
-# Import your existing classes
-from config import ISLConfig
-from enhancedDataPreprocessor import EnhancedDataPreprocessor
-
-class GestureBoundaryVisualizer:
-    def __init__(self, motion_threshold=0.02, min_gesture_length=3):
-        self.motion_threshold = motion_threshold
-        self.min_gesture_length = min_gesture_length
+class EnhancedDataPreprocessor:
+    def __init__(self, config):
+        self.config = config
+        self.label_encoder = None  # Initialize your label encoder here
         
-    def detect_gesture_boundaries_with_debug(self, landmarks_sequence):
+    def detect_gesture_boundaries(self, landmarks_sequence, motion_threshold=0.02, min_gesture_length=3):
         """
-        Enhanced version of detect_gesture_boundaries that returns debug information
+        Detect the start and end of actual gesture movement
+        Args:
+            landmarks_sequence: (N, 154) array of landmarks
+        Returns:
+            (start_frame, end_frame) tuple indicating gesture boundaries
         """
         if len(landmarks_sequence) < 2:
-            return 0, len(landmarks_sequence) - 1, {
-                'motion_scores': np.array([0]),
-                'dynamic_threshold': self.motion_threshold,
-                'raw_motion': np.array([0])
-            }
+            return 0, len(landmarks_sequence) - 1
             
         # Calculate frame-to-frame motion for hands and upper body
         motion_scores = []
-        raw_motion_scores = []
         
         for i in range(1, len(landmarks_sequence)):
-            # Focus on hand landmarks (0:126) and key pose points for motion detection
+            # Focus on hand landmarks (0:126) for motion detection
             prev_frame = landmarks_sequence[i-1][:126]  # Hand landmarks only
             curr_frame = landmarks_sequence[i][:126]
             
@@ -52,13 +47,10 @@ class GestureBoundaryVisualizer:
                     
             if valid_points > 0:
                 motion_scores.append(motion / valid_points)
-                raw_motion_scores.append(motion / valid_points)
             else:
                 motion_scores.append(0)
-                raw_motion_scores.append(0)
         
         motion_scores = np.array(motion_scores)
-        raw_motion_scores = np.array(raw_motion_scores)
         
         # Smooth the motion curve to reduce noise
         if len(motion_scores) > 1:
@@ -67,7 +59,7 @@ class GestureBoundaryVisualizer:
         # Find gesture boundaries using adaptive threshold
         mean_motion = np.mean(motion_scores)
         std_motion = np.std(motion_scores)
-        dynamic_threshold = max(self.motion_threshold, mean_motion + 0.5 * std_motion)
+        dynamic_threshold = max(motion_threshold, mean_motion + 0.5 * std_motion)
         
         # Find start of gesture (first sustained motion)
         start_frame = 0
@@ -98,306 +90,293 @@ class GestureBoundaryVisualizer:
                     break
         
         # Ensure minimum gesture length
-        if end_frame - start_frame < self.min_gesture_length:
+        if end_frame - start_frame < min_gesture_length:
             # If detected gesture is too short, expand it
             center = (start_frame + end_frame) // 2
-            half_min = self.min_gesture_length // 2
+            half_min = min_gesture_length // 2
             start_frame = max(0, center - half_min)
             end_frame = min(len(landmarks_sequence), center + half_min + 1)
         
-        debug_info = {
-            'motion_scores': motion_scores,
-            'raw_motion_scores': raw_motion_scores,
-            'dynamic_threshold': dynamic_threshold,
-            'mean_motion': mean_motion,
-            'std_motion': std_motion,
-            'static_threshold': self.motion_threshold
-        }
-        
-        return start_frame, min(end_frame, len(landmarks_sequence) - 1), debug_info
-    
-    def visualize_gesture_detection(self, video_path, output_dir="gesture_analysis", save_frames=True):
+        return start_frame, min(end_frame, len(landmarks_sequence) - 1)
+
+    def extract_frames_from_range(self, video_path, start_frame_idx, end_frame_idx, target_count):
         """
-        Visualize the gesture detection process and save selected frames
+        Extract specific number of frames from a given range in the video
+        Args:
+            video_path: path to video file
+            start_frame_idx: starting frame index
+            end_frame_idx: ending frame index  
+            target_count: number of frames to extract (config.SEQUENCE_LENGTH)
+        Returns:
+            frames, landmarks_sequence
         """
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Load config and preprocessor
-        config = ISLConfig()
-        preprocessor = EnhancedDataPreprocessor(config)
+        # Ensure frame indices are within bounds
+        start_frame_idx = max(0, start_frame_idx)
+        end_frame_idx = min(total_frames - 1, end_frame_idx)
         
-        print(f"[INFO] Processing video: {video_path}")
+        # Calculate available frames in the range
+        available_frames = end_frame_idx - start_frame_idx + 1
         
-        # Preprocess video to get frames and landmarks
-        frames, landmarks = preprocessor.preprocess_video(video_path)
+        if available_frames <= 0:
+            cap.release()
+            return self._create_empty_sequence(target_count)
         
-        print(f"[INFO] Video shape: {frames.shape}")
-        print(f"[INFO] Landmarks shape: {landmarks.shape}")
+        # Determine frame indices to extract from the motion range
+        if available_frames >= target_count:
+            # If we have enough frames, sample evenly from the range
+            frame_indices = np.linspace(start_frame_idx, end_frame_idx, target_count, dtype=int)
+        else:
+            # If we don't have enough frames, take all available frames and pad later
+            frame_indices = np.arange(start_frame_idx, end_frame_idx + 1, dtype=int)
         
-        # Detect gesture boundaries with debug info
-        start_frame, end_frame, debug_info = self.detect_gesture_boundaries_with_debug(landmarks)
+        frames, landmarks_sequence = [], []
+        frame_idx, extracted_count = 0, 0
         
-        print(f"\n[RESULTS] Gesture Detection Results:")
-        print(f"  - Total frames: {len(frames)}")
-        print(f"  - Gesture start frame: {start_frame}")
-        print(f"  - Gesture end frame: {end_frame}")
-        print(f"  - Gesture length: {end_frame - start_frame + 1}")
-        print(f"  - Dynamic threshold: {debug_info['dynamic_threshold']:.4f}")
-        print(f"  - Mean motion: {debug_info['mean_motion']:.4f}")
-        print(f"  - Motion std: {debug_info['std_motion']:.4f}")
+        # Extract frames
+        while cap.isOpened() and extracted_count < len(frame_indices):
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            if frame_idx == frame_indices[extracted_count]:
+                frames.append(cv2.resize(frame, self.config.IMG_SIZE, interpolation=cv2.INTER_LANCZOS4))
+                landmarks_sequence.append(self.extract_landmarks(frame))
+                extracted_count += 1
+                
+            frame_idx += 1
         
-        # Create motion analysis plot
-        self.plot_motion_analysis(debug_info, start_frame, end_frame, 
-                                 len(frames), output_dir)
+        cap.release()
         
-        if save_frames:
-            # Save all frames with annotations
-            self.save_annotated_frames(frames, start_frame, end_frame, output_dir)
-            
-            # Save only gesture frames
-            self.save_gesture_frames(frames, start_frame, end_frame, output_dir)
-        
-        return {
-            'start_frame': start_frame,
-            'end_frame': end_frame,
-            'total_frames': len(frames),
-            'gesture_length': end_frame - start_frame + 1,
-            'debug_info': debug_info
-        }
-    
-    def plot_motion_analysis(self, debug_info, start_frame, end_frame, total_frames, output_dir):
-        """
-        Create a comprehensive motion analysis plot
-        """
-        motion_scores = debug_info['motion_scores']
-        raw_motion = debug_info['raw_motion_scores']
-        dynamic_threshold = debug_info['dynamic_threshold']
-        static_threshold = debug_info['static_threshold']
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
-        
-        # Frame indices (motion scores are 1 shorter than total frames)
-        frame_indices = np.arange(1, len(motion_scores) + 1)
-        
-        # Plot 1: Raw vs Smoothed Motion Scores
-        ax1.plot(frame_indices, raw_motion, 'lightblue', alpha=0.7, label='Raw Motion', linewidth=1)
-        ax1.plot(frame_indices, motion_scores, 'darkblue', linewidth=2, label='Smoothed Motion')
-        ax1.axhline(y=dynamic_threshold, color='red', linestyle='--', linewidth=2, label=f'Dynamic Threshold ({dynamic_threshold:.4f})')
-        ax1.axhline(y=static_threshold, color='orange', linestyle=':', linewidth=2, label=f'Static Threshold ({static_threshold:.4f})')
-        
-        # Highlight gesture region
-        ax1.axvspan(start_frame, end_frame, alpha=0.3, color='green', label='Detected Gesture')
-        
-        ax1.set_xlabel('Frame Number')
-        ax1.set_ylabel('Motion Score')
-        ax1.set_title('Motion Score Analysis')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Frame-by-frame analysis with gesture boundaries
-        frame_labels = ['Non-Gesture'] * total_frames
-        for i in range(start_frame, end_frame + 1):
-            if i < len(frame_labels):
-                frame_labels[i] = 'Gesture'
-        
-        colors = ['red' if label == 'Non-Gesture' else 'green' for label in frame_labels]
-        ax2.bar(range(total_frames), [1] * total_frames, color=colors, alpha=0.6)
-        ax2.set_xlabel('Frame Number')
-        ax2.set_ylabel('Frame Type')
-        ax2.set_title('Frame Classification (Red: Non-Gesture, Green: Gesture)')
-        ax2.set_ylim(0, 1.2)
-        
-        # Add frame numbers on x-axis
-        step = max(1, total_frames // 20)  # Show at most 20 labels
-        ax2.set_xticks(range(0, total_frames, step))
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'motion_analysis.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"[✅] Motion analysis plot saved to: {os.path.join(output_dir, 'motion_analysis.png')}")
-    
-    def save_annotated_frames(self, frames, start_frame, end_frame, output_dir):
-        """
-        Save all frames with annotations showing which are gesture/non-gesture
-        """
-        annotated_dir = os.path.join(output_dir, "all_frames_annotated")
-        os.makedirs(annotated_dir, exist_ok=True)
-        
-        for i, frame in enumerate(frames):
-            # Convert frame to uint8 if needed
-            if frame.dtype != np.uint8:
-                if frame.max() <= 1.0:
-                    frame_img = (frame * 255).astype(np.uint8)
-                else:
-                    frame_img = frame.astype(np.uint8)
+        # Pad if necessary
+        current_length = len(frames)
+        if current_length < target_count:
+            pad_needed = target_count - current_length
+            if current_length > 0:
+                # Pad with last frame
+                frames.extend([frames[-1]] * pad_needed)
+                landmarks_sequence.extend([landmarks_sequence[-1]] * pad_needed)
             else:
-                frame_img = frame.copy()
-            
-            # Add annotation
-            is_gesture = start_frame <= i <= end_frame
-            color = (0, 255, 0) if is_gesture else (0, 0, 255)  # Green for gesture, Red for non-gesture
-            text = f"Frame {i}: {'GESTURE' if is_gesture else 'NON-GESTURE'}"
-            
-            # Add text overlay
-            cv2.putText(frame_img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.7, color, 2, cv2.LINE_AA)
-            
-            # Add colored border
-            cv2.rectangle(frame_img, (0, 0), (frame_img.shape[1]-1, frame_img.shape[0]-1), 
-                         color, 3)
-            
-            # Save frame
-            cv2.imwrite(os.path.join(annotated_dir, f"frame_{i:03d}.jpg"), frame_img)
+                # Create empty sequence if no frames were extracted
+                frames, landmarks_sequence = self._create_empty_sequence(target_count)
         
-        print(f"[✅] Annotated frames saved to: {annotated_dir}")
-    
-    def save_gesture_frames(self, frames, start_frame, end_frame, output_dir):
+        return np.array(frames[:target_count]), np.array(landmarks_sequence[:target_count])
+
+    def _create_empty_sequence(self, target_count):
+        """Create empty frames and landmarks when no valid data is available"""
+        frames = [np.zeros((*self.config.IMG_SIZE, 3), dtype=np.uint8)] * target_count
+        landmarks_sequence = [np.zeros(170)] * target_count  # Adjust based on your landmark size
+        return frames, landmarks_sequence
+
+    def preprocess_video(self, video_path):
         """
-        Save only the frames identified as gesture frames
+        Enhanced preprocessing that first detects motion boundaries, then extracts frames from motion region
         """
-        gesture_dir = os.path.join(output_dir, "gesture_frames_only")
-        os.makedirs(gesture_dir, exist_ok=True)
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
         
-        gesture_count = 0
-        for i in range(start_frame, end_frame + 1):
-            if i < len(frames):
-                frame = frames[i]
+        if total_frames == 0:
+            print(f"Warning: No frames found in {video_path}")
+            return self._create_empty_sequence(self.config.SEQUENCE_LENGTH)
+        
+        # STEP 1: Initial sampling to detect motion boundaries
+        print(f"[DEBUG] Step 1: Initial sampling from {total_frames} total frames")
+        initial_frames, initial_landmarks = self._initial_frame_sampling(video_path, total_frames)
+        
+        if len(initial_frames) == 0:
+            print(f"Warning: No frames extracted from {video_path}")
+            return self._create_empty_sequence(self.config.SEQUENCE_LENGTH)
+        
+        # STEP 2: Detect gesture boundaries from initial sampling  
+        print(f"[DEBUG] Step 2: Detecting gesture boundaries from {len(initial_landmarks)} frames")
+        motion_start_idx, motion_end_idx = self.detect_gesture_boundaries(initial_landmarks)
+        
+        print(f"[DEBUG] Motion detected from frame {motion_start_idx} to {motion_end_idx} (in sampled sequence)")
+        
+        # STEP 3: Map back to original video frame indices
+        # We need to map from our sampled indices back to original video frame indices
+        if total_frames > self.config.SEQUENCE_LENGTH:
+            # Recreate the original sampling pattern to map indices
+            seg_len = self.config.SEQUENCE_LENGTH // 3
+            rem = self.config.SEQUENCE_LENGTH % 3
+            begin_indices = np.linspace(0, total_frames//3 - 1, seg_len, dtype=int)
+            middle_indices = np.linspace(total_frames//3, 2*total_frames//3 - 1, seg_len, dtype=int)
+            end_indices = np.linspace(2*total_frames//3, total_frames - 1, seg_len + rem, dtype=int)
+            original_frame_indices = np.unique(np.concatenate([begin_indices, middle_indices, end_indices]))
+            
+            # Map motion boundaries to original video frame indices
+            original_motion_start = original_frame_indices[motion_start_idx]
+            original_motion_end = original_frame_indices[min(motion_end_idx, len(original_frame_indices) - 1)]
+        else:
+            # For short videos, direct mapping
+            original_motion_start = motion_start_idx
+            original_motion_end = min(motion_end_idx, total_frames - 1)
+        
+        print(f"[DEBUG] Mapped to original video frames: {original_motion_start} to {original_motion_end}")
+        
+        # STEP 4: Extract frames specifically from the motion region
+        print(f"[DEBUG] Step 4: Extracting {self.config.SEQUENCE_LENGTH} frames from motion region")
+        final_frames, final_landmarks = self.extract_frames_from_range(
+            video_path, 
+            original_motion_start, 
+            original_motion_end, 
+            self.config.SEQUENCE_LENGTH
+        )
+        
+        print(f"[DEBUG] Final extraction: {len(final_frames)} frames, {len(final_landmarks)} landmark sets")
+        
+        return final_frames, final_landmarks
+
+    def _initial_frame_sampling(self, video_path, total_frames):
+        """
+        Perform initial frame sampling using the original method (for motion detection)
+        """
+        cap = cv2.VideoCapture(video_path)
+        
+        # Use original sampling logic
+        if total_frames > self.config.SEQUENCE_LENGTH:
+            seg_len = self.config.SEQUENCE_LENGTH // 3
+            rem = self.config.SEQUENCE_LENGTH % 3
+            begin_indices = np.linspace(0, total_frames//3 - 1, seg_len, dtype=int)
+            middle_indices = np.linspace(total_frames//3, 2*total_frames//3 - 1, seg_len, dtype=int)
+            end_indices = np.linspace(2*total_frames//3, total_frames - 1, seg_len + rem, dtype=int)
+            frame_indices = np.unique(np.concatenate([begin_indices, middle_indices, end_indices]))
+        else:
+            frame_indices = list(range(total_frames))
+        
+        frames, landmarks_sequence = [], []
+        frame_idx, extracted_count = 0, 0
+        
+        while cap.isOpened() and extracted_count < len(frame_indices):
+            ret, frame = cap.read()
+            if not ret:
+                break
                 
-                # Convert frame to uint8 if needed
-                if frame.dtype != np.uint8:
-                    if frame.max() <= 1.0:
-                        frame_img = (frame * 255).astype(np.uint8)
-                    else:
-                        frame_img = frame.astype(np.uint8)
-                else:
-                    frame_img = frame.copy()
+            if frame_idx == frame_indices[extracted_count]:
+                frames.append(cv2.resize(frame, self.config.IMG_SIZE, interpolation=cv2.INTER_LANCZOS4))
+                landmarks_sequence.append(self.extract_landmarks(frame))
+                extracted_count += 1
                 
-                # Add frame number annotation
-                cv2.putText(frame_img, f"Original Frame {i}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+            frame_idx += 1
+        
+        cap.release()
+        
+        # Pad to target length if necessary
+        current_length = len(frames)
+        target_length = self.config.SEQUENCE_LENGTH
+        
+        if 0 < current_length < target_length:
+            pad_needed = target_length - current_length
+            frames.extend([frames[-1]] * pad_needed)
+            landmarks_sequence.extend([landmarks_sequence[-1]] * pad_needed)
+        elif current_length == 0:
+            frames = [np.zeros((*self.config.IMG_SIZE, 3), dtype=np.uint8)] * target_length
+            landmarks_sequence = [np.zeros(170)] * target_length
+        
+        return np.array(frames[:target_length]), np.array(landmarks_sequence[:target_length])
+
+    def load_and_preprocess_data(self):
+        """
+        Enhanced data preprocessing with motion-based frame selection
+        """
+        print("Starting enhanced data preprocessing with motion detection...")
+        manifest, label_set = [], set()
+        categories = [d for d in os.listdir(self.config.DATA_PATH) if os.path.isdir(os.path.join(self.config.DATA_PATH, d))]
+        sample_index = 0
+        
+        # Statistics tracking
+        motion_stats = {
+            'videos_processed': 0,
+            'motion_regions_detected': 0,
+            'average_motion_percentage': 0,
+            'motion_percentages': []
+        }
+        
+        for category in tqdm(categories, desc="Processing categories"):
+            category_path = os.path.join(self.config.DATA_PATH, category)
+            
+            for class_name in tqdm(os.listdir(category_path), desc=f"Processing {category}", leave=False):
+                class_path = os.path.join(category_path, class_name)
+                if not os.path.isdir(class_path):
+                    continue
                 
-                # Save frame
-                cv2.imwrite(os.path.join(gesture_dir, f"gesture_frame_{gesture_count:03d}_orig_{i:03d}.jpg"), 
-                           frame_img)
-                gesture_count += 1
+                for video_file in os.listdir(class_path):
+                    if not video_file.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                        continue
+                        
+                    video_path = os.path.join(class_path, video_file)
+                    
+                    try:
+                        print(f"\n[INFO] Processing: {video_path}")
+                        frames, landmarks = self.preprocess_video(video_path)
+                        
+                        # Save processed data
+                        video_name = os.path.splitext(video_file)[0]
+                        target_dir = os.path.join(self.config.CHUNKED_DATA_DIR, category, class_name, video_name)
+                        os.makedirs(target_dir, exist_ok=True)
+                        
+                        frame_path = os.path.join(target_dir, "frames.npy")
+                        landmarks_path = os.path.join(target_dir, "landmarks.npy")
+                        
+                        np.save(frame_path, frames.astype('float32') / 255.0)
+                        np.save(landmarks_path, landmarks)
+                        
+                        # Update manifest
+                        label = f"{category}_{class_name}"
+                        label_set.add(label)
+                        
+                        manifest.append({
+                            "index": sample_index,
+                            "label": label,
+                            "original_video": video_path,
+                            "frame_path": frame_path,
+                            "landmarks_path": landmarks_path
+                        })
+                        
+                        sample_index += 1
+                        motion_stats['videos_processed'] += 1
+                        
+                    except Exception as e:
+                        print(f"❌ Error processing {video_path}: {e}")
+                        import traceback
+                        traceback.print_exc()
         
-        print(f"[✅] {gesture_count} gesture frames saved to: {gesture_dir}")
-    
-    def compare_multiple_videos(self, video_paths, output_dir="multi_video_analysis"):
-        """
-        Compare gesture detection across multiple videos
-        """
-        os.makedirs(output_dir, exist_ok=True)
+        # Encode labels
+        labels = [entry["label"] for entry in manifest]
+        y_encoded = self.label_encoder.fit_transform(labels)
         
-        results = []
+        for i, entry in enumerate(manifest):
+            entry["encoded_label"] = int(y_encoded[i])
         
-        for i, video_path in enumerate(video_paths):
-            print(f"\n[INFO] Processing video {i+1}/{len(video_paths)}: {video_path}")
+        # Save manifest and label encoder
+        with open(os.path.join(self.config.CHUNKED_DATA_DIR, "manifest.json"), 'w') as f:
+            json.dump(manifest, f, indent=2)
             
-            video_output_dir = os.path.join(output_dir, f"video_{i+1}")
-            result = self.visualize_gesture_detection(video_path, video_output_dir, save_frames=True)
-            result['video_path'] = video_path
-            results.append(result)
+        with open(os.path.join(self.config.CHUNKED_DATA_DIR, "label_encoder.pkl"), 'wb') as f:
+            pickle.dump(self.label_encoder, f)
         
-        # Create comparison summary
-        self.create_comparison_summary(results, output_dir)
+        # Save processing statistics
+        stats_path = os.path.join(self.config.CHUNKED_DATA_DIR, "motion_detection_stats.json")
+        with open(stats_path, 'w') as f:
+            json.dump(motion_stats, f, indent=2)
         
-        return results
-    
-    def create_comparison_summary(self, results, output_dir):
+        print(f"\n✅ Enhanced preprocessing complete!")
+        print(f"   - Processed {motion_stats['videos_processed']} videos")
+        print(f"   - Saved {sample_index} samples")
+        print(f"   - Found {len(self.label_encoder.classes_)} classes")
+        print(f"   - Motion detection applied to all videos")
+        print(f"   - Statistics saved to: {stats_path}")
+        
+        return manifest, list(self.label_encoder.classes_)
+
+    def extract_landmarks(self, frame):
         """
-        Create a summary comparison of multiple videos
+        Placeholder for your landmark extraction method
+        Replace this with your actual landmark extraction implementation
         """
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        
-        video_names = [f"Video {i+1}" for i in range(len(results))]
-        
-        # Plot 1: Gesture lengths
-        gesture_lengths = [r['gesture_length'] for r in results]
-        axes[0, 0].bar(video_names, gesture_lengths, color='skyblue')
-        axes[0, 0].set_title('Gesture Lengths (frames)')
-        axes[0, 0].set_ylabel('Number of Frames')
-        
-        # Plot 2: Gesture start positions
-        start_frames = [r['start_frame'] for r in results]
-        axes[0, 1].bar(video_names, start_frames, color='lightcoral')
-        axes[0, 1].set_title('Gesture Start Positions')
-        axes[0, 1].set_ylabel('Frame Number')
-        
-        # Plot 3: Total video lengths
-        total_frames = [r['total_frames'] for r in results]
-        axes[1, 0].bar(video_names, total_frames, color='lightgreen')
-        axes[1, 0].set_title('Total Video Lengths')
-        axes[1, 0].set_ylabel('Number of Frames')
-        
-        # Plot 4: Gesture percentage
-        gesture_percentages = [(r['gesture_length'] / r['total_frames']) * 100 for r in results]
-        axes[1, 1].bar(video_names, gesture_percentages, color='gold')
-        axes[1, 1].set_title('Gesture Percentage of Video')
-        axes[1, 1].set_ylabel('Percentage (%)')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'comparison_summary.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Save detailed results to text file
-        with open(os.path.join(output_dir, 'detailed_results.txt'), 'w') as f:
-            f.write("GESTURE DETECTION COMPARISON RESULTS\n")
-            f.write("=" * 50 + "\n\n")
-            
-            for i, result in enumerate(results):
-                f.write(f"Video {i+1}: {result['video_path']}\n")
-                f.write(f"  Total frames: {result['total_frames']}\n")
-                f.write(f"  Gesture start: {result['start_frame']}\n")
-                f.write(f"  Gesture end: {result['end_frame']}\n")
-                f.write(f"  Gesture length: {result['gesture_length']}\n")
-                f.write(f"  Gesture percentage: {(result['gesture_length']/result['total_frames'])*100:.1f}%\n")
-                f.write(f"  Dynamic threshold: {result['debug_info']['dynamic_threshold']:.4f}\n")
-                f.write(f"  Mean motion: {result['debug_info']['mean_motion']:.4f}\n")
-                f.write("-" * 40 + "\n")
-        
-        print(f"[✅] Comparison summary saved to: {output_dir}")
-
-
-def main():
-    """
-    Example usage of the visualization tool
-    """
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Visualize gesture boundary detection")
-    parser.add_argument("--video", type=str, required=True, help="Path to input video")
-    parser.add_argument("--output", type=str, default="gesture_analysis", 
-                       help="Output directory for analysis results")
-    parser.add_argument("--motion_threshold", type=float, default=0.02, 
-                       help="Motion threshold for gesture detection")
-    parser.add_argument("--min_gesture_length", type=int, default=3, 
-                       help="Minimum gesture length in frames")
-    parser.add_argument("--no_frames", action="store_true", 
-                       help="Skip saving individual frames (only create plots)")
-    
-    args = parser.parse_args()
-    
-    # Initialize visualizer
-    visualizer = GestureBoundaryVisualizer(
-        motion_threshold=args.motion_threshold,
-        min_gesture_length=args.min_gesture_length
-    )
-    
-    # Run visualization
-    results = visualizer.visualize_gesture_detection(
-        args.video, 
-        args.output, 
-        save_frames=not args.no_frames
-    )
-    
-    print(f"\n[SUMMARY] Gesture Detection Complete!")
-    print(f"  Results saved to: {args.output}")
-    print(f"  Gesture frames: {results['start_frame']} to {results['end_frame']}")
-    print(f"  Total gesture length: {results['gesture_length']} frames")
-
-
-if __name__ == "__main__":
-    main()
+        # This should return your landmark features (e.g., 154 or 170 dimensional vector)
+        # For now, returning zeros as placeholder
+        return np.zeros(154)  # Adjust size based on your landmark format
