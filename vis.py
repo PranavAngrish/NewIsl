@@ -1,31 +1,34 @@
 import numpy as np
-from scipy.spatial.distance import cosine, euclidean
-from scipy.stats import pearsonr
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import StandardScaler
-from fastdtw import fastdtw
-from scipy.ndimage import gaussian_filter1d
 import cv2
+import matplotlib.pyplot as plt
+import os
+from scipy.ndimage import gaussian_filter1d
+import sys
+sys.path.append("/Users/I528933/Desktop/NewIsl-main")
 
-class GestureSimilarityCalculator:
+# Import your existing classes
+from config import ISLConfig
+from enhancedDataPreprocessor import EnhancedDataPreprocessor
+
+class GestureBoundaryVisualizer:
     def __init__(self, motion_threshold=0.02, min_gesture_length=3):
-        self.scaler = StandardScaler()
-        self.motion_threshold = motion_threshold  # Minimum motion to consider as gesture
-        self.min_gesture_length = min_gesture_length  # Minimum frames for valid gesture
+        self.motion_threshold = motion_threshold
+        self.min_gesture_length = min_gesture_length
         
-    def detect_gesture_boundaries(self, landmarks_sequence):
+    def detect_gesture_boundaries_with_debug(self, landmarks_sequence):
         """
-        Detect the start and end of actual gesture movement
-        Args:
-            landmarks_sequence: (16, 154) array of landmarks
-        Returns:
-            (start_frame, end_frame) tuple indicating gesture boundaries
+        Enhanced version of detect_gesture_boundaries that returns debug information
         """
         if len(landmarks_sequence) < 2:
-            return 0, len(landmarks_sequence) - 1
+            return 0, len(landmarks_sequence) - 1, {
+                'motion_scores': np.array([0]),
+                'dynamic_threshold': self.motion_threshold,
+                'raw_motion': np.array([0])
+            }
             
         # Calculate frame-to-frame motion for hands and upper body
         motion_scores = []
+        raw_motion_scores = []
         
         for i in range(1, len(landmarks_sequence)):
             # Focus on hand landmarks (0:126) and key pose points for motion detection
@@ -49,10 +52,13 @@ class GestureSimilarityCalculator:
                     
             if valid_points > 0:
                 motion_scores.append(motion / valid_points)
+                raw_motion_scores.append(motion / valid_points)
             else:
                 motion_scores.append(0)
+                raw_motion_scores.append(0)
         
         motion_scores = np.array(motion_scores)
+        raw_motion_scores = np.array(raw_motion_scores)
         
         # Smooth the motion curve to reduce noise
         if len(motion_scores) > 1:
@@ -99,538 +105,299 @@ class GestureSimilarityCalculator:
             start_frame = max(0, center - half_min)
             end_frame = min(len(landmarks_sequence), center + half_min + 1)
         
-        return start_frame, min(end_frame, len(landmarks_sequence) - 1)
-    
-    def extract_gesture_segment(self, landmarks_sequence):
-        """
-        Extract only the gesture portion from the sequence
-        Args:
-            landmarks_sequence: (16, 154) array of landmarks
-        Returns:
-            gesture_landmarks: extracted gesture segment
-            boundaries: (start, end) frame indices
-        """
-        start_frame, end_frame = self.detect_gesture_boundaries(landmarks_sequence)
-        gesture_segment = landmarks_sequence[start_frame:end_frame + 1]
-        
-        return gesture_segment, (start_frame, end_frame)
-    
-    def align_gesture_sequences(self, landmarks1, landmarks2):
-        """
-        Extract and align gesture segments from both sequences
-        Args:
-            landmarks1: (16, 154) landmarks for video 1
-            landmarks2: (16, 154) landmarks for video 2
-        Returns:
-            aligned_landmarks1, aligned_landmarks2, alignment_info
-        """
-        # Extract gesture segments
-        gesture1, bounds1 = self.extract_gesture_segment(landmarks1)
-        gesture2, bounds2 = self.extract_gesture_segment(landmarks2)
-        
-        # If one gesture is significantly longer, we may want to resample
-        len1, len2 = len(gesture1), len(gesture2)
-        
-        alignment_info = {
-            'original_bounds1': bounds1,
-            'original_bounds2': bounds2,
-            'gesture_lengths': (len1, len2),
-            'length_ratio': max(len1, len2) / max(min(len1, len2), 1)
+        debug_info = {
+            'motion_scores': motion_scores,
+            'raw_motion_scores': raw_motion_scores,
+            'dynamic_threshold': dynamic_threshold,
+            'mean_motion': mean_motion,
+            'std_motion': std_motion,
+            'static_threshold': self.motion_threshold
         }
         
-        # If length difference is significant, resample to match
-        if alignment_info['length_ratio'] > 1.5:
-            target_length = max(len1, len2)
-            
-            if len1 < target_length:
-                gesture1 = self._resample_sequence(gesture1, target_length)
-            if len2 < target_length:
-                gesture2 = self._resample_sequence(gesture2, target_length)
-                
-        return gesture1, gesture2, alignment_info
+        return start_frame, min(end_frame, len(landmarks_sequence) - 1), debug_info
     
-    def _resample_sequence(self, sequence, target_length):
+    def visualize_gesture_detection(self, video_path, output_dir="gesture_analysis", save_frames=True):
         """
-        Resample sequence to target length using interpolation
-        Args:
-            sequence: (N, 154) sequence to resample
-            target_length: desired length
-        Returns:
-            resampled sequence
+        Visualize the gesture detection process and save selected frames
         """
-        if len(sequence) == target_length:
-            return sequence
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Load config and preprocessor
+        config = ISLConfig()
+        preprocessor = EnhancedDataPreprocessor(config)
+        
+        print(f"[INFO] Processing video: {video_path}")
+        
+        # Preprocess video to get frames and landmarks
+        frames, landmarks = preprocessor.preprocess_video(video_path)
+        
+        print(f"[INFO] Video shape: {frames.shape}")
+        print(f"[INFO] Landmarks shape: {landmarks.shape}")
+        
+        # Detect gesture boundaries with debug info
+        start_frame, end_frame, debug_info = self.detect_gesture_boundaries_with_debug(landmarks)
+        
+        print(f"\n[RESULTS] Gesture Detection Results:")
+        print(f"  - Total frames: {len(frames)}")
+        print(f"  - Gesture start frame: {start_frame}")
+        print(f"  - Gesture end frame: {end_frame}")
+        print(f"  - Gesture length: {end_frame - start_frame + 1}")
+        print(f"  - Dynamic threshold: {debug_info['dynamic_threshold']:.4f}")
+        print(f"  - Mean motion: {debug_info['mean_motion']:.4f}")
+        print(f"  - Motion std: {debug_info['std_motion']:.4f}")
+        
+        # Create motion analysis plot
+        self.plot_motion_analysis(debug_info, start_frame, end_frame, 
+                                 len(frames), output_dir)
+        
+        if save_frames:
+            # Save all frames with annotations
+            self.save_annotated_frames(frames, start_frame, end_frame, output_dir)
             
-        # Create interpolation indices
-        original_indices = np.linspace(0, len(sequence) - 1, len(sequence))
-        target_indices = np.linspace(0, len(sequence) - 1, target_length)
+            # Save only gesture frames
+            self.save_gesture_frames(frames, start_frame, end_frame, output_dir)
         
-        # Interpolate each landmark dimension
-        resampled = np.zeros((target_length, sequence.shape[1]))
-        
-        for dim in range(sequence.shape[1]):
-            resampled[:, dim] = np.interp(target_indices, original_indices, sequence[:, dim])
-            
-        return resampled
-        
-    def normalize_landmarks(self, landmarks_sequence):
-        """
-        Normalize full landmark sequences to make them scale and translation invariant
-        Args:
-            landmarks_sequence: (N, 154) array of full landmarks
-        Returns:
-            normalized landmarks
-        """
-        # Reshape to (N, 154) if needed
-        if len(landmarks_sequence.shape) == 3:
-            landmarks_sequence = landmarks_sequence.reshape(landmarks_sequence.shape[0], -1)
-            
-        # Check if this is full landmarks (154) or partial
-        feature_count = landmarks_sequence.shape[1]
-        
-        if feature_count == 154:
-            return self._normalize_full_landmarks(landmarks_sequence)
-        elif feature_count == 126:
-            return self._normalize_hand_landmarks(landmarks_sequence)
-        elif feature_count == 28:
-            return self._normalize_pose_landmarks(landmarks_sequence)
-        else:
-            raise ValueError(f"Unsupported landmark feature count: {feature_count}")
+        return {
+            'start_frame': start_frame,
+            'end_frame': end_frame,
+            'total_frames': len(frames),
+            'gesture_length': end_frame - start_frame + 1,
+            'debug_info': debug_info
+        }
     
-    def _normalize_full_landmarks(self, landmarks_sequence):
-        """Normalize full 154-feature landmarks"""
-        normalized_sequence = []
+    def plot_motion_analysis(self, debug_info, start_frame, end_frame, total_frames, output_dir):
+        """
+        Create a comprehensive motion analysis plot
+        """
+        motion_scores = debug_info['motion_scores']
+        raw_motion = debug_info['raw_motion_scores']
+        dynamic_threshold = debug_info['dynamic_threshold']
+        static_threshold = debug_info['static_threshold']
         
-        for frame_landmarks in landmarks_sequence:
-            # Split into hand1 (63), hand2 (63), pose (28)
-            hand1_landmarks = frame_landmarks[:63].reshape(-1, 3)  # (21, 3)
-            hand2_landmarks = frame_landmarks[63:126].reshape(-1, 3)  # (21, 3)
-            pose_landmarks = frame_landmarks[126:154].reshape(-1, 4)  # (7, 4)
-            
-            # Normalize each hand relative to wrist (first landmark)
-            if np.any(hand1_landmarks):
-                wrist1 = hand1_landmarks[0]
-                hand1_normalized = hand1_landmarks - wrist1
-                hand1_normalized = hand1_normalized.flatten()
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+        
+        # Frame indices (motion scores are 1 shorter than total frames)
+        frame_indices = np.arange(1, len(motion_scores) + 1)
+        
+        # Plot 1: Raw vs Smoothed Motion Scores
+        ax1.plot(frame_indices, raw_motion, 'lightblue', alpha=0.7, label='Raw Motion', linewidth=1)
+        ax1.plot(frame_indices, motion_scores, 'darkblue', linewidth=2, label='Smoothed Motion')
+        ax1.axhline(y=dynamic_threshold, color='red', linestyle='--', linewidth=2, label=f'Dynamic Threshold ({dynamic_threshold:.4f})')
+        ax1.axhline(y=static_threshold, color='orange', linestyle=':', linewidth=2, label=f'Static Threshold ({static_threshold:.4f})')
+        
+        # Highlight gesture region
+        ax1.axvspan(start_frame, end_frame, alpha=0.3, color='green', label='Detected Gesture')
+        
+        ax1.set_xlabel('Frame Number')
+        ax1.set_ylabel('Motion Score')
+        ax1.set_title('Motion Score Analysis')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Frame-by-frame analysis with gesture boundaries
+        frame_labels = ['Non-Gesture'] * total_frames
+        for i in range(start_frame, end_frame + 1):
+            if i < len(frame_labels):
+                frame_labels[i] = 'Gesture'
+        
+        colors = ['red' if label == 'Non-Gesture' else 'green' for label in frame_labels]
+        ax2.bar(range(total_frames), [1] * total_frames, color=colors, alpha=0.6)
+        ax2.set_xlabel('Frame Number')
+        ax2.set_ylabel('Frame Type')
+        ax2.set_title('Frame Classification (Red: Non-Gesture, Green: Gesture)')
+        ax2.set_ylim(0, 1.2)
+        
+        # Add frame numbers on x-axis
+        step = max(1, total_frames // 20)  # Show at most 20 labels
+        ax2.set_xticks(range(0, total_frames, step))
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'motion_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"[✅] Motion analysis plot saved to: {os.path.join(output_dir, 'motion_analysis.png')}")
+    
+    def save_annotated_frames(self, frames, start_frame, end_frame, output_dir):
+        """
+        Save all frames with annotations showing which are gesture/non-gesture
+        """
+        annotated_dir = os.path.join(output_dir, "all_frames_annotated")
+        os.makedirs(annotated_dir, exist_ok=True)
+        
+        for i, frame in enumerate(frames):
+            # Convert frame to uint8 if needed
+            if frame.dtype != np.uint8:
+                if frame.max() <= 1.0:
+                    frame_img = (frame * 255).astype(np.uint8)
+                else:
+                    frame_img = frame.astype(np.uint8)
             else:
-                hand1_normalized = hand1_landmarks.flatten()
+                frame_img = frame.copy()
+            
+            # Add annotation
+            is_gesture = start_frame <= i <= end_frame
+            color = (0, 255, 0) if is_gesture else (0, 0, 255)  # Green for gesture, Red for non-gesture
+            text = f"Frame {i}: {'GESTURE' if is_gesture else 'NON-GESTURE'}"
+            
+            # Add text overlay
+            cv2.putText(frame_img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.7, color, 2, cv2.LINE_AA)
+            
+            # Add colored border
+            cv2.rectangle(frame_img, (0, 0), (frame_img.shape[1]-1, frame_img.shape[0]-1), 
+                         color, 3)
+            
+            # Save frame
+            cv2.imwrite(os.path.join(annotated_dir, f"frame_{i:03d}.jpg"), frame_img)
+        
+        print(f"[✅] Annotated frames saved to: {annotated_dir}")
+    
+    def save_gesture_frames(self, frames, start_frame, end_frame, output_dir):
+        """
+        Save only the frames identified as gesture frames
+        """
+        gesture_dir = os.path.join(output_dir, "gesture_frames_only")
+        os.makedirs(gesture_dir, exist_ok=True)
+        
+        gesture_count = 0
+        for i in range(start_frame, end_frame + 1):
+            if i < len(frames):
+                frame = frames[i]
                 
-            if np.any(hand2_landmarks):
-                wrist2 = hand2_landmarks[0]
-                hand2_normalized = hand2_landmarks - wrist2
-                hand2_normalized = hand2_normalized.flatten()
-            else:
-                hand2_normalized = hand2_landmarks.flatten()
-            
-            # Normalize pose landmarks relative to nose (first landmark)
-            if np.any(pose_landmarks):
-                nose = pose_landmarks[0, :3]  # x, y, z only
-                pose_normalized = pose_landmarks.copy()
-                pose_normalized[:, :3] = pose_landmarks[:, :3] - nose
-                pose_normalized = pose_normalized.flatten()
-            else:
-                pose_normalized = pose_landmarks.flatten()
-            
-            # Combine normalized landmarks
-            frame_normalized = np.concatenate([hand1_normalized, hand2_normalized, pose_normalized])
-            normalized_sequence.append(frame_normalized)
-            
-        return np.array(normalized_sequence)
-    
-    def _normalize_hand_landmarks(self, landmarks_sequence):
-        """Normalize 126-feature hand landmarks"""
-        normalized_sequence = []
-        
-        for frame_landmarks in landmarks_sequence:
-            # Split into hand1 (63), hand2 (63)
-            hand1_landmarks = frame_landmarks[:63].reshape(-1, 3)  # (21, 3)
-            hand2_landmarks = frame_landmarks[63:126].reshape(-1, 3)  # (21, 3)
-            
-            # Normalize each hand relative to wrist (first landmark)
-            if np.any(hand1_landmarks):
-                wrist1 = hand1_landmarks[0]
-                hand1_normalized = hand1_landmarks - wrist1
-                hand1_normalized = hand1_normalized.flatten()
-            else:
-                hand1_normalized = hand1_landmarks.flatten()
+                # Convert frame to uint8 if needed
+                if frame.dtype != np.uint8:
+                    if frame.max() <= 1.0:
+                        frame_img = (frame * 255).astype(np.uint8)
+                    else:
+                        frame_img = frame.astype(np.uint8)
+                else:
+                    frame_img = frame.copy()
                 
-            if np.any(hand2_landmarks):
-                wrist2 = hand2_landmarks[0]
-                hand2_normalized = hand2_landmarks - wrist2
-                hand2_normalized = hand2_normalized.flatten()
-            else:
-                hand2_normalized = hand2_landmarks.flatten()
-            
-            # Combine normalized hand landmarks
-            frame_normalized = np.concatenate([hand1_normalized, hand2_normalized])
-            normalized_sequence.append(frame_normalized)
-            
-        return np.array(normalized_sequence)
-    
-    def _normalize_pose_landmarks(self, landmarks_sequence):
-        """Normalize 28-feature pose landmarks"""
-        normalized_sequence = []
-        
-        for frame_landmarks in landmarks_sequence:
-            # Reshape to (7, 4) for pose landmarks
-            pose_landmarks = frame_landmarks.reshape(-1, 4)  # (7, 4)
-            
-            # Normalize pose landmarks relative to nose (first landmark)
-            if np.any(pose_landmarks):
-                nose = pose_landmarks[0, :3]  # x, y, z only (exclude visibility)
-                pose_normalized = pose_landmarks.copy()
-                pose_normalized[:, :3] = pose_landmarks[:, :3] - nose
-                pose_normalized = pose_normalized.flatten()
-            else:
-                pose_normalized = pose_landmarks.flatten()
-            
-            normalized_sequence.append(pose_normalized)
-            
-        return np.array(normalized_sequence)
-    
-    def calculate_frame_similarity(self, frame1_landmarks, frame2_landmarks, method='cosine'):
-        """
-        Calculate similarity between two frames
-        Args:
-            frame1_landmarks: (154,) landmarks for frame 1
-            frame2_landmarks: (154,) landmarks for frame 2
-            method: 'cosine', 'euclidean', 'correlation'
-        Returns:
-            similarity score (higher = more similar)
-        """
-        if method == 'cosine':
-            # Cosine similarity (0 to 1, higher is more similar)
-            similarity = cosine_similarity([frame1_landmarks], [frame2_landmarks])[0][0]
-            return max(0, similarity)  # Ensure non-negative
-            
-        elif method == 'euclidean':
-            # Euclidean distance (convert to similarity)
-            distance = euclidean(frame1_landmarks, frame2_landmarks)
-            similarity = 1 / (1 + distance)  # Convert distance to similarity
-            return similarity
-            
-        elif method == 'correlation':
-            # Pearson correlation coefficient
-            if np.std(frame1_landmarks) == 0 or np.std(frame2_landmarks) == 0:
-                return 0.0
-            correlation, _ = pearsonr(frame1_landmarks, frame2_landmarks)
-            return max(0, correlation)  # Only positive correlations
-            
-        else:
-            raise ValueError("Method must be 'cosine', 'euclidean', or 'correlation'")
-    
-    def calculate_sequence_similarity(self, landmarks1, landmarks2, method='dtw_aligned'):
-        """
-        Calculate similarity between two gesture sequences with temporal alignment
-        Args:
-            landmarks1: (16, 154) landmarks for video 1
-            landmarks2: (16, 154) landmarks for video 2
-            method: 'dtw_aligned', 'average_frames', 'dtw', 'weighted_temporal'
-        Returns:
-            similarity score (0 to 1, higher is more similar)
-        """
-        if method == 'dtw_aligned':
-            # First align gesture segments, then apply DTW
-            aligned_landmarks1, aligned_landmarks2, alignment_info = self.align_gesture_sequences(landmarks1, landmarks2)
-            
-            # Normalize the aligned sequences
-            norm_landmarks1 = self.normalize_landmarks(aligned_landmarks1)
-            norm_landmarks2 = self.normalize_landmarks(aligned_landmarks2)
-            
-            # Apply DTW on the aligned sequences
-            distance, _ = fastdtw(norm_landmarks1, norm_landmarks2, dist=euclidean)
-            
-            # Convert distance to similarity
-            max_possible_distance = np.sqrt(len(norm_landmarks1) * len(norm_landmarks1[0]))
-            similarity = 1 - (distance / (max_possible_distance * max(len(norm_landmarks1), len(norm_landmarks2))))
-            
-            return max(0, similarity)
-            
-        else:
-            # For other methods, use the original implementation but with alignment
-            aligned_landmarks1, aligned_landmarks2, _ = self.align_gesture_sequences(landmarks1, landmarks2)
-            
-            # Normalize landmarks first
-            norm_landmarks1 = self.normalize_landmarks(aligned_landmarks1)
-            norm_landmarks2 = self.normalize_landmarks(aligned_landmarks2)
-            
-            if method == 'average_frames':
-                # Simple average of frame-by-frame similarities
-                min_length = min(len(norm_landmarks1), len(norm_landmarks2))
-                similarities = []
-                for i in range(min_length):
-                    sim = self.calculate_frame_similarity(norm_landmarks1[i], norm_landmarks2[i], 'cosine')
-                    similarities.append(sim)
-                return np.mean(similarities)
+                # Add frame number annotation
+                cv2.putText(frame_img, f"Original Frame {i}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
                 
-            elif method == 'dtw':
-                # Pure DTW without pre-alignment
-                distance, _ = fastdtw(norm_landmarks1, norm_landmarks2, dist=euclidean)
-                max_possible_distance = np.sqrt(len(norm_landmarks1) * len(norm_landmarks1[0]))
-                similarity = 1 - (distance / (max_possible_distance * len(norm_landmarks1)))
-                return max(0, similarity)
-                
-            elif method == 'weighted_temporal':
-                # Weight middle frames more heavily (peak gesture moments)
-                min_length = min(len(norm_landmarks1), len(norm_landmarks2))
-                similarities = []
-                weights = self._get_temporal_weights(min_length)
-                
-                for i in range(min_length):
-                    sim = self.calculate_frame_similarity(norm_landmarks1[i], norm_landmarks2[i], 'cosine')
-                    similarities.append(sim * weights[i])
-                
-                return np.sum(similarities) / np.sum(weights)
-                
-            else:
-                raise ValueError("Method must be 'dtw_aligned', 'average_frames', 'dtw', or 'weighted_temporal'")
-    
-    def _get_temporal_weights(self, sequence_length):
-        """Generate weights that emphasize middle frames"""
-        weights = np.ones(sequence_length)
-        middle = sequence_length // 2
+                # Save frame
+                cv2.imwrite(os.path.join(gesture_dir, f"gesture_frame_{gesture_count:03d}_orig_{i:03d}.jpg"), 
+                           frame_img)
+                gesture_count += 1
         
-        # Create a bell curve centered at the middle
-        for i in range(sequence_length):
-            distance_from_middle = abs(i - middle)
-            weights[i] = np.exp(-0.3 * distance_from_middle)
+        print(f"[✅] {gesture_count} gesture frames saved to: {gesture_dir}")
+    
+    def compare_multiple_videos(self, video_paths, output_dir="multi_video_analysis"):
+        """
+        Compare gesture detection across multiple videos
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        results = []
+        
+        for i, video_path in enumerate(video_paths):
+            print(f"\n[INFO] Processing video {i+1}/{len(video_paths)}: {video_path}")
             
-        return weights
-    
-    def calculate_hand_similarity(self, landmarks1, landmarks2):
-        """
-        Calculate similarity focusing only on hand landmarks with alignment
-        Args:
-            landmarks1: (16, 154) landmarks for video 1
-            landmarks2: (16, 154) landmarks for video 2
-        Returns:
-            hand similarity score
-        """
-        # First align the full sequences to get proper gesture boundaries
-        aligned_landmarks1, aligned_landmarks2, _ = self.align_gesture_sequences(landmarks1, landmarks2)
+            video_output_dir = os.path.join(output_dir, f"video_{i+1}")
+            result = self.visualize_gesture_detection(video_path, video_output_dir, save_frames=True)
+            result['video_path'] = video_path
+            results.append(result)
         
-        # Extract hand landmarks only (first 126 features)
-        hand_landmarks1 = aligned_landmarks1[:, :126]
-        hand_landmarks2 = aligned_landmarks2[:, :126]
-        
-        # Use DTW for hand comparison as hands have more complex temporal patterns
-        norm_landmarks1 = self.normalize_landmarks(hand_landmarks1)
-        norm_landmarks2 = self.normalize_landmarks(hand_landmarks2)
-        
-        distance, _ = fastdtw(norm_landmarks1, norm_landmarks2, dist=euclidean)
-        max_possible_distance = np.sqrt(len(norm_landmarks1) * len(norm_landmarks1[0]))
-        similarity = 1 - (distance / (max_possible_distance * max(len(norm_landmarks1), len(norm_landmarks2))))
-        
-        return max(0, similarity)
-    
-    def calculate_pose_similarity(self, landmarks1, landmarks2):
-        """
-        Calculate similarity focusing only on pose landmarks with alignment
-        Args:
-            landmarks1: (16, 154) landmarks for video 1
-            landmarks2: (16, 154) landmarks for video 2
-        Returns:
-            pose similarity score
-        """
-        # First align the full sequences to get proper gesture boundaries
-        aligned_landmarks1, aligned_landmarks2, _ = self.align_gesture_sequences(landmarks1, landmarks2)
-        
-        # Extract pose landmarks only (last 28 features)
-        pose_landmarks1 = aligned_landmarks1[:, 126:]
-        pose_landmarks2 = aligned_landmarks2[:, 126:]
-        
-        # Use simpler comparison for pose as it's usually more stable
-        norm_landmarks1 = self.normalize_landmarks(pose_landmarks1)
-        norm_landmarks2 = self.normalize_landmarks(pose_landmarks2)
-        
-        # Use average frame similarity for pose
-        min_length = min(len(norm_landmarks1), len(norm_landmarks2))
-        similarities = []
-        for i in range(min_length):
-            sim = self.calculate_frame_similarity(norm_landmarks1[i], norm_landmarks2[i], 'cosine')
-            similarities.append(sim)
-        
-        return np.mean(similarities) if similarities else 0.0
-    
-    def calculate_comprehensive_similarity(self, landmarks1, landmarks2):
-        """
-        Calculate comprehensive similarity using multiple methods with temporal alignment
-        Args:
-            landmarks1: (16, 154) landmarks for video 1
-            landmarks2: (16, 154) landmarks for video 2
-        Returns:
-            dictionary with different similarity scores
-        """
-        results = {}
-        
-        # Get alignment info for debugging
-        _, _, alignment_info = self.align_gesture_sequences(landmarks1, landmarks2)
-        results['alignment_info'] = alignment_info
-        
-        # Overall similarities with alignment-aware methods
-        results['overall_dtw_aligned'] = self.calculate_sequence_similarity(
-            landmarks1, landmarks2, method='dtw_aligned'
-        )
-        results['overall_average_aligned'] = self.calculate_sequence_similarity(
-            landmarks1, landmarks2, method='average_frames'
-        )
-        results['overall_weighted_aligned'] = self.calculate_sequence_similarity(
-            landmarks1, landmarks2, method='weighted_temporal'
-        )
-        
-        # Component-specific similarities (already use alignment internally)
-        results['hand_similarity'] = self.calculate_hand_similarity(landmarks1, landmarks2)
-        results['pose_similarity'] = self.calculate_pose_similarity(landmarks1, landmarks2)
-        
-        # Combined weighted score emphasizing DTW alignment
-        results['combined_score'] = (
-            0.4 * results['overall_dtw_aligned'] +
-            0.3 * results['hand_similarity'] +
-            0.2 * results['overall_weighted_aligned'] +
-            0.1 * results['pose_similarity']
-        )
+        # Create comparison summary
+        self.create_comparison_summary(results, output_dir)
         
         return results
     
-    def compare_gestures(self, video_path1, video_path2, preprocessor):
+    def create_comparison_summary(self, results, output_dir):
         """
-        Complete pipeline to compare gestures from two videos
-        Args:
-            video_path1: path to first video
-            video_path2: path to second video  
-            preprocessor: your preprocessing class instance
-        Returns:
-            similarity results dictionary
+        Create a summary comparison of multiple videos
         """
-        # Preprocess both videos
-        frames1, landmarks1 = preprocessor.preprocess_video(video_path1)
-        frames2, landmarks2 = preprocessor.preprocess_video(video_path2)
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         
-        # Calculate comprehensive similarity
-        similarity_results = self.calculate_comprehensive_similarity(landmarks1, landmarks2)
+        video_names = [f"Video {i+1}" for i in range(len(results))]
         
-        # Add interpretation
-        combined_score = similarity_results['combined_score']
-        if combined_score >= 0.8:
-            interpretation = "Very similar gestures"
-        elif combined_score >= 0.6:
-            interpretation = "Moderately similar gestures"
-        elif combined_score >= 0.4:
-            interpretation = "Somewhat similar gestures"
-        else:
-            interpretation = "Different gestures"
+        # Plot 1: Gesture lengths
+        gesture_lengths = [r['gesture_length'] for r in results]
+        axes[0, 0].bar(video_names, gesture_lengths, color='skyblue')
+        axes[0, 0].set_title('Gesture Lengths (frames)')
+        axes[0, 0].set_ylabel('Number of Frames')
+        
+        # Plot 2: Gesture start positions
+        start_frames = [r['start_frame'] for r in results]
+        axes[0, 1].bar(video_names, start_frames, color='lightcoral')
+        axes[0, 1].set_title('Gesture Start Positions')
+        axes[0, 1].set_ylabel('Frame Number')
+        
+        # Plot 3: Total video lengths
+        total_frames = [r['total_frames'] for r in results]
+        axes[1, 0].bar(video_names, total_frames, color='lightgreen')
+        axes[1, 0].set_title('Total Video Lengths')
+        axes[1, 0].set_ylabel('Number of Frames')
+        
+        # Plot 4: Gesture percentage
+        gesture_percentages = [(r['gesture_length'] / r['total_frames']) * 100 for r in results]
+        axes[1, 1].bar(video_names, gesture_percentages, color='gold')
+        axes[1, 1].set_title('Gesture Percentage of Video')
+        axes[1, 1].set_ylabel('Percentage (%)')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'comparison_summary.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Save detailed results to text file
+        with open(os.path.join(output_dir, 'detailed_results.txt'), 'w') as f:
+            f.write("GESTURE DETECTION COMPARISON RESULTS\n")
+            f.write("=" * 50 + "\n\n")
             
-        similarity_results['interpretation'] = interpretation
+            for i, result in enumerate(results):
+                f.write(f"Video {i+1}: {result['video_path']}\n")
+                f.write(f"  Total frames: {result['total_frames']}\n")
+                f.write(f"  Gesture start: {result['start_frame']}\n")
+                f.write(f"  Gesture end: {result['end_frame']}\n")
+                f.write(f"  Gesture length: {result['gesture_length']}\n")
+                f.write(f"  Gesture percentage: {(result['gesture_length']/result['total_frames'])*100:.1f}%\n")
+                f.write(f"  Dynamic threshold: {result['debug_info']['dynamic_threshold']:.4f}\n")
+                f.write(f"  Mean motion: {result['debug_info']['mean_motion']:.4f}\n")
+                f.write("-" * 40 + "\n")
         
-        return similarity_results
-
-# Example usage with temporal alignment:
-"""
-# Initialize the calculator with motion detection parameters
-similarity_calculator = GestureSimilarityCalculator(
-    motion_threshold=0.02,  # Adjust based on your data
-    min_gesture_length=3    # Minimum frames for valid gesture
-)
-
-# Method 1: If you already have preprocessed landmarks
-landmarks_video1 = ...  # (16, 154) array from your preprocessing
-landmarks_video2 = ...  # (16, 154) array from your preprocessing
-
-# Calculate comprehensive similarity with temporal alignment
-results = similarity_calculator.calculate_comprehensive_similarity(landmarks_video1, landmarks_video2)
-
-print("Similarity Results:")
-for key, value in results.items():
-    if key == 'alignment_info':
-        print(f"Alignment Info:")
-        print(f"  Video 1 gesture frames: {value['original_bounds1']}")
-        print(f"  Video 2 gesture frames: {value['original_bounds2']}")
-        print(f"  Gesture lengths: {value['gesture_lengths']}")
-        print(f"  Length ratio: {value['length_ratio']:.2f}")
-    elif key != 'interpretation':
-        print(f"{key}: {value:.4f}")
-    else:
-        print(f"{key}: {value}")
-
-# Method 2: Debug gesture detection
-gesture1, bounds1 = similarity_calculator.extract_gesture_segment(landmarks_video1)
-gesture2, bounds2 = similarity_calculator.extract_gesture_segment(landmarks_video2)
-
-print(f"\\nGesture Detection:")
-print(f"Video 1: gesture from frame {bounds1[0]} to {bounds1[1]} (length: {len(gesture1)})")
-print(f"Video 2: gesture from frame {bounds2[0]} to {bounds2[1]} (length: {len(gesture2)})")
-
-# Method 3: Complete pipeline with video paths
-# results = similarity_calculator.compare_gestures(
-#     "path/to/video1.mp4", 
-#     "path/to/video2.mp4", 
-#     your_preprocessor_instance
-# )
-"""
+        print(f"[✅] Comparison summary saved to: {output_dir}")
 
 
+def main():
+    """
+    Example usage of the visualization tool
+    """
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Visualize gesture boundary detection")
+    parser.add_argument("--video", type=str, required=True, help="Path to input video")
+    parser.add_argument("--output", type=str, default="gesture_analysis", 
+                       help="Output directory for analysis results")
+    parser.add_argument("--motion_threshold", type=float, default=0.02, 
+                       help="Motion threshold for gesture detection")
+    parser.add_argument("--min_gesture_length", type=int, default=3, 
+                       help="Minimum gesture length in frames")
+    parser.add_argument("--no_frames", action="store_true", 
+                       help="Skip saving individual frames (only create plots)")
+    
+    args = parser.parse_args()
+    
+    # Initialize visualizer
+    visualizer = GestureBoundaryVisualizer(
+        motion_threshold=args.motion_threshold,
+        min_gesture_length=args.min_gesture_length
+    )
+    
+    # Run visualization
+    results = visualizer.visualize_gesture_detection(
+        args.video, 
+        args.output, 
+        save_frames=not args.no_frames
+    )
+    
+    print(f"\n[SUMMARY] Gesture Detection Complete!")
+    print(f"  Results saved to: {args.output}")
+    print(f"  Gesture frames: {results['start_frame']} to {results['end_frame']}")
+    print(f"  Total gesture length: {results['gesture_length']} frames")
 
-import os
-import sys
-sys.path.append("/Users/I528933/Desktop/NewIsl-main")
-import torch
-import numpy as np
-import cv2
-import argparse
-from config import ISLConfig
-
-from enhancedDataPreprocessor import EnhancedDataPreprocessor, EnhancedVideoDataset  # your files
-from albumentations.pytorch import ToTensorV2
-
-def augment_video_from_file(video_path, output_dir, config_path=None):
-    # Load config
-    config = ISLConfig() if config_path is None else ISLConfig(config_path)
-    preprocessor = EnhancedDataPreprocessor(config)
-
-    print(f"[INFO] Preprocessing {video_path}")
-    frames, landmarks = preprocessor.preprocess_video(video_path)
-    print("[DEBUG] Landmarks shape before saving:", landmarks.shape)
-
-
-    # Dummy manifest for a single sample
-    dummy_manifest = [{
-        "frame_path": "temp_frames.npy",
-        "landmarks_path": "temp_landmarks.npy",
-        "encoded_label": 0  # Dummy label
-    }]
-
-    # Save temp files for compatibility with Dataset class
-    np.save("temp_frames.npy", frames.astype('float32') / 255.0)
-    np.save("temp_landmarks.npy", landmarks)
-
-    # Initialize Dataset for applying augmentations
-    dataset = EnhancedVideoDataset(dummy_manifest, config, mode='train')
-    (augmented_frames, augmented_landmarks), _ = dataset[0]  # Apply __getitem__
-
-    # Save augmented frames to output folder
-    os.makedirs(output_dir, exist_ok=True)
-    for i in range(augmented_frames.shape[0]):
-        frame = augmented_frames[i].permute(1, 2, 0).numpy() * 255.0
-        frame = np.clip(frame, 0, 255).astype(np.uint8)
-        cv2.imwrite(os.path.join(output_dir, f"aug_frame_{i:03d}.jpg"), frame)
-
-    print(f"[✅] Augmented frames saved to: {output_dir}")
-
-    # Clean up temp files
-    os.remove("temp_frames.npy")
-    os.remove("temp_landmarks.npy")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--video", type=str, required=True, help="Path to input video")
-    parser.add_argument("--output", type=str, default="augmented_output", help="Directory to save augmented frames")
-    parser.add_argument("--config", type=str, default=None, help="Optional path to config file")
-    args = parser.parse_args()
-
-    augment_video_from_file(args.video, args.output, args.config)
-
-
-
-
-
-write me a code to extract the landmark indices that are being accepted via the detect_gesture_boundaries and use the other visualisation code to help me visualise those images so that I can see which frames are being selected by the code
+    main()
